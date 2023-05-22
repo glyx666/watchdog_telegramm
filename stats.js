@@ -242,6 +242,7 @@ function postStatistics(ctx) {
           Шрифтов: ${row.font_count}\n\n`;
         });
         ctx.reply(response);
+        logChanges('Запрошена статистика у stats.js');
         console.log(ctx);
       }
     });
@@ -251,7 +252,8 @@ function postStatistics(ctx) {
 setInterval(() => {
   const stats = scanFolder(folderPath);
   updateLocalDB(stats);
-}, 1000 * 60 * 1);
+}, 1000 * 60 * 30);
+logChanges('Обновление информации о папке');
 
 module.exports = {
   postStatistics,

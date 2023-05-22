@@ -4,12 +4,14 @@ const { Markup } = require('telegraf');
 const chokidar = require('chokidar');
 require('dotenv').config();
 const fs = require("fs");
-const { getMenuMarkup, getSubMenuMarkup, getSubMenuMarkupMonitor, getSubMenuMarkupNotify } = require('./menu');
+const { getMenuMarkup, getSubMenuMarkupLogs, getSubMenuMarkup, getSubMenuMarkupMonitor, getSubMenuMarkupNotify } = require('./menu');
 const { postStatistics, updateStats, getFileType } = require('./stats');
 const { createReadStream } = require('fs');
-const { logChanges } = require('./logging');
+const { logChanges, getLastLogLines, sendLastLogFile } = require('./logging');
 const { promisify } = require('util');
-const { findAndSendFile } = require('./finder')
+const statistics = require('./statistics.js');
+const path = require('path');
+const folderPath = process.env.FOLDER_PATH;
 //Создание объекта бота:
 const bot = new Telegraf(process.env.BOT_TOKEN);
 //Настройка отслеживания папки и обработчик событий:
@@ -36,23 +38,21 @@ function toggleMonitoring(enabled) {
       watcher.on('add', (path) => {
         console.log(`New file added: ${path}`);
         logChanges(`New file added: ${path}`);
+        statistics.incrementNotifications('add');
         if (isMonitoring && isNotificationEnabled) {
-          bot.telegram.sendMessage(
-            process.env.CHAT_ID,
-            `Новый файл добавлен: ${path}`
-          );
+          bot.telegram.sendMessage(process.env.CHAT_ID, `Новый файл добавлен: ${path}`);
         }
+        statistics.incrementFilesProcessed();
       });
 
       watcher.on('change', (path) => {
         console.log(`File changed: ${path}`);
         logChanges(`File changed: ${path}`);
+        statistics.incrementNotifications('change');
         if (isMonitoring && isNotificationEnabled) {
-          bot.telegram.sendMessage(
-            process.env.CHAT_ID,
-            `Файл изменен: ${path}`
-          );
+          bot.telegram.sendMessage(process.env.CHAT_ID, `Файл изменен: ${path}`);
         }
+        statistics.incrementFilesProcessed();
       });
 
       isMonitoring = true;
@@ -67,10 +67,19 @@ function toggleMonitoring(enabled) {
   }
 }
 
+// Обработчик команды /getfile тут должна быть кнопка с функционалом 'скачать файл'
+
 // Функция для включения или отключения отправки уведомлений
 function toggleNotifications(enabled) {
   isNotificationEnabled = enabled;
 }
+bot.command('start', (ctx) => {
+  logChanges('Команда start выполнена');
+  toggleMonitoring(true);
+  sendMenu(ctx);
+  ctx.reply(`Меню для работы с: ${process.env.FOLDER_PATH}`);
+  statistics.incrementNotifications();
+});
 
 // Обработчик команды "Включить мониторинг"
 bot.command('check', (ctx) => {
@@ -78,6 +87,7 @@ bot.command('check', (ctx) => {
   toggleMonitoring(true);
   sendMenu(ctx);
   ctx.reply(`Начинаю отслеживание папки: ${process.env.FOLDER_PATH}`);
+  statistics.incrementNotifications();
 });
 
 // Обработчик команды "Отключить мониторинг"
@@ -86,10 +96,12 @@ bot.command('uncheck', (ctx) => {
   toggleMonitoring(false);
   sendMenu(ctx);
   ctx.reply(`Прекращаю отслеживание папки: ${process.env.FOLDER_PATH}`);
+  statistics.incrementNotifications();
 });
 // Обработчик команды "Включить уведомления"
 bot.hears('Включить уведомления', (ctx) => {
   if (!isNotificationEnabled) {
+    logChanges('Уведомления включены');
     toggleNotifications(true);
     ctx.reply('Уведомления включены');
   } else {
@@ -100,6 +112,7 @@ bot.hears('Включить уведомления', (ctx) => {
 // Обработчик команды "Выключить уведомления"
 bot.hears('Выключить уведомления', (ctx) => {
   if (isNotificationEnabled) {
+    logChanges('Уведомления выключены');
     toggleNotifications(false);
     ctx.reply('Уведомления отключены');
   } else {
@@ -144,25 +157,44 @@ bot.hears('Информация', (ctx) => {
   ctx.reply('Выберите:', SubMenuMarkup);
 });
 
+bot.hears('Логи', (ctx) => {
+  const SubMenuMarkupLogs = getSubMenuMarkupLogs();
+  ctx.reply('Выберите:', SubMenuMarkupLogs);
+});
+
 bot.hears('О папке', async (ctx) => {
   const stats = await updateStats();
   postStatistics(ctx);
 });
-// Обработчик кнопки "Назад"
 
+bot.hears('Последние 25 записей', (ctx) => {
+  const logLines = getLastLogLines(25);
+  const logMessage = logLines.join('\n');
+  ctx.reply('Ваши последние 25 записей логов:\n' + logMessage);
+});
+
+bot.hears('Последние 50 записей', (ctx) => {
+  const logLines = getLastLogLines(50);
+  const logMessage = logLines.join('\n');
+  ctx.reply('Ваши последние 50 записей логов:\n' + logMessage);
+});
+
+bot.hears('Загрузить последние сутки', (ctx) => {
+  sendLastLogFile(ctx);
+});
 
 bot.hears('Пауза на 1 час', (ctx) => {
   ctx.reply('Должна остановить отправку сообщений на 1 час , кроме конкретных отслеживаемых файлов');
 });
 
-// Команда /download для поиска и отправки файла
-bot.command('Скачать файл', async (ctx) => {
-  const folderPath = process.env.FOLDER_PATH; // Путь к папке, которую нужно отслеживать
-  await findAndSendFile(ctx, folderPath);
+bot.hears('Счетчики', (ctx) => {
+  statistics.stopExecutionTimer();
+  const { notifications, filesProcessed, executionTime } = statistics.getStatistics();
+  ctx.reply(`Статистика использования:\nУведомления: ${notifications}\nОбработанные файлы: ${filesProcessed}\nВремя работы: ${executionTime}`);
 });
 
 bot.hears('One Drive logs', (ctx) => {
-  ctx.reply('One Drive  логи: https://1drv.ms/f/s!AuVxNFZKlGyMgYpHZvyfbk704Vemuw');
+  ctx.reply('One Drive  логи: https://1drv.ms/f/s!AuVxNFZKlGyMgYtYIO_KVVpUq9XTTw');
 });
 // Пример, вызов функции collectStatistics каждый час 
 setInterval(() => {
@@ -173,25 +205,27 @@ setInterval(() => {
     .catch((err) => {
       console.error(err);
     });
-}, 1000 * 60 * 10);// интервал (в мсек) сохранения инфы в бд 
+}, 1000 * 60 * 60);// интервал (в мсек) сохранения инфы в бд 
 
 function sendMenu(ctx) {
   const menuMarkup = getMenuMarkup();
   ctx.reply('Выберите действие:', menuMarkup);
 }
 
-// Обработчик кнопки "Назад"
+// Обработчик кнопок "Назад"
 bot.hears('Назад', (ctx) => {
   sendMenu(ctx);
 });
 
 bot.start();
+statistics.startExecutionTimer();
 //Запуск бота:
 bot.launch();
 logChanges('Бот запущен');
 bot.telegram.sendMessage(process.env.CHAT_ID, 'Выберите действие:')
   .then(() => {
     logChanges('Уведомление отправлено');
+    statistics.incrementNotifications();
     console.log('Уведомление отправлено');
   })
   .catch((e) => {
@@ -201,5 +235,7 @@ bot.telegram.sendMessage(process.env.CHAT_ID, 'Выберите действие
 console.log('Bot has been started...');
 module.exports = { 
   bot, 
+  toggleMonitoring,
+  toggleNotifications,
   sendMenu
 };
